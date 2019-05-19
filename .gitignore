@@ -1,4 +1,10 @@
 public_data
+program
+results
+utils/res
+utils/logs
+saved_actions_*
+*.zip
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
