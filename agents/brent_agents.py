@@ -1,10 +1,166 @@
 import os
 
 import numpy as np
+from keras import layers
+from keras.models import Model
+from keras import backend as K
+from keras import utils as np_utils
+from keras import optimizers
 
 from pypownet.agent import Agent, ActIOnManager
 import pypownet.environment
 import pypownet.agent
+
+
+def compute_discounted_R(R, discount_rate=.99):
+    """
+    https://gist.github.com/kkweon/c8d1caabaf7b43317bc8825c226045d2
+
+    Returns discounted rewards
+    Args:
+        R (1-D array): a list of `reward` at each time step
+        discount_rate (float): Will discount the future value by this rate
+    Returns:
+        discounted_r (1-D array): same shape as input `R`
+            but the values are discounted
+    Examples:
+        >>> R = [1, 1, 1]
+        >>> compute_discounted_R(R, .99) # before normalization
+        [1 + 0.99 + 0.99**2, 1 + 0.99, 1]
+    """
+    discounted_r = np.zeros_like(R, dtype=np.float32)
+    running_add = 0
+    for t in reversed(range(len(R))):
+
+        running_add = running_add * discount_rate + R[t]
+        discounted_r[t] = running_add
+
+    discounted_r -= (discounted_r.mean() / discounted_r.std())
+
+    return discounted_r
+
+
+class AgentPolicyGradient(Agent):
+    """
+    https://gist.github.com/kkweon/c8d1caabaf7b43317bc8825c226045d2
+    """
+    def __init__(self, environment, mode='test', model=None):
+        super().__init__(environment)
+        self.ioman = ActIOnManager(destination_path=os.path.join('saved_actions', 'AgentPolicyGradient.csv'))
+        self.mode = mode
+        game = self.environment.game
+
+        self.n_state = game.export_observation().as_ac_minimalist().as_array().shape[0]
+        self.n_action = environment.action_space.get_do_nothing_action().shape[0]
+        self.prob_thresh = 0.9
+
+        self.__build_network(self.n_state, self.n_action)
+        self.__build_train_fn()
+
+
+    def __build_network(self, input_dim, output_dim, hidden_dims=[100]):
+        """Create a simple neural network"""
+        self.X = layers.Input(shape=(input_dim,))
+        net = self.X
+
+        for h_dim in hidden_dims:
+            net = layers.Dense(h_dim)(net)
+            net = layers.Activation("relu")(net)
+
+        net = layers.Dense(output_dim)(net)
+        net = layers.Activation("softmax")(net)
+
+        self.model = Model(inputs=self.X, outputs=net)
+
+    def __build_train_fn(self):
+        """Create a train function
+        It replaces `model.fit(X, y)` because we use the output of model and use it for training.
+        For example, we need action placeholder
+        called `action_one_hot` that stores, which action we took at state `s`.
+        Hence, we can update the same action.
+        This function will create
+        `self.train_fn([state, action_one_hot, discount_reward])`
+        which would train the model.
+        """
+        action_prob_placeholder = self.model.output
+        action_onehot_placeholder = K.placeholder(shape=(None, self.n_action),
+                                                  name="action_onehot")
+        discount_reward_placeholder = K.placeholder(shape=(None,),
+                                                    name="discount_reward")
+
+        action_prob = K.sum(action_prob_placeholder * action_onehot_placeholder, axis=1)
+        log_action_prob = K.log(action_prob)
+
+        loss = - log_action_prob * discount_reward_placeholder
+        loss = K.mean(loss)
+
+        adam = optimizers.Adam()
+
+        updates = adam.get_updates(params=self.model.trainable_weights,
+                                   loss=loss)
+
+        self.train_fn = K.function(inputs=[self.model.input,
+                                           action_onehot_placeholder,
+                                           discount_reward_placeholder],
+                                    outputs=[],
+                                    updates=updates)
+
+    def act(self, observation):
+        """Returns an action at given `state`
+        Args:
+            state (1-D or 2-D Array): It can be either 1-D array of shape (state_dimension, )
+                or 2-D array shape of (n_samples, state_dimension)
+        Returns:
+            action: an integer action value ranging from 0 to (n_actions - 1)
+        """
+        # This agent needs to manipulate actions using grid contextual information, so the observation object needs
+        # to be of class pypownet.environment.Observation: convert from array or raise error if that is not the case
+        if not isinstance(observation, pypownet.environment.Observation):
+            try:
+                observation = self.environment.observation_space.array_to_observation(observation)
+            except Exception as e:
+                raise e
+        # Sanity check: an observation is a structured object defined in the environment file.
+        assert isinstance(observation, pypownet.environment.Observation)
+        action_space = self.environment.action_space
+        state_vec = observation.as_ac_minimalist().as_array().astype(int)
+        shape = state_vec.shape   
+
+        if len(shape) == 1:
+            assert shape == (self.n_state,)
+            state = np.expand_dims(state_vec, axis=0)
+
+        elif len(shape) == 2:
+            assert shape[1] == (self.n_state)
+
+        action_prob = np.squeeze(self.model.predict(state))
+        assert len(action_prob) == self.n_action
+        # note right now we can only take one action at a time. 
+        # we could modify this to optimize the whole action vector at once?
+        # return (action_prob > self.prob_thresh).astype(int)
+        action_idx = np.random.choice(np.arange(self.n_action), p=action_prob)
+        action_vec = action_space.get_do_nothing_action()
+        action_vec[action_idx] = 1
+        return action_vec
+
+    def fit(self, S, A, R):
+        """Train a network
+        Args:
+            S (2-D Array): `state` array of shape (n_samples, state_dimension)
+            A (1-D Array): `action` array of shape (n_samples,)
+                It's simply a list of int that stores which actions the agent chose
+            R (1-D Array): `reward` array of shape (n_samples,)
+                A reward is given after each action.
+        """
+        action_onehot = np_utils.to_categorical(A, num_classes=self.n_action)
+        discount_reward = compute_discounted_R(R)
+
+        assert S.shape[1] == self.n_state
+        assert action_onehot.shape[0] == S.shape[0]
+        assert action_onehot.shape[1] == self.n_action
+        assert len(discount_reward.shape) == 1
+
+        self.train_fn([S, action_onehot, discount_reward])
 
 
 class AgentQ(Agent):
@@ -16,15 +172,20 @@ class AgentQ(Agent):
     def __init__(self, environment, mode='test', qtable=None):
         super().__init__(environment)
         self.ioman = ActIOnManager(destination_path=os.path.join('saved_actions', 'AgentZero.csv'))
-        n_state = environment.observation_space.n
-        n_action = environment.action_space.n
+        self.game = self.environment.game
+        self.mode = mode
+        # initialize storage of state vectors (for Q-learning)
+        self.state_vec = self.get_state_vector()
+        self.new_state_vec = self.get_state_vector()
+        self.n_state = self.state_vec.shape[0]
+        self.n_action = environment.action_space.get_do_nothing_action().shape[0]
         # Q(S,A)
         # note the Q table is initialized with the Agent. to train over multiple episodes the
         # environment must be reset but the agent must persist
-        if isinstance(qtable, np.array) && qtable.shape == (n_state, n_action):
+        if isinstance(qtable, np.ndarray) and (qtable.shape == (self.n_state, self.n_action)):
             self.qtable = qtable
         else:
-            self.qtable = np.zeros((n_state, n_action))
+            self.qtable = np.zeros((self.n_state, self.n_action))
         # todo these should probably live somewhere more accessible?
         # hyperparameters
         self.total_episodes = 15000        # Total episodes
@@ -48,75 +209,42 @@ class AgentQ(Agent):
         # Sanity check: an observation is a structured object defined in the environment file.
         assert isinstance(observation, pypownet.environment.Observation)
         action_space = self.environment.action_space
+        self.state_vec = self.get_state_vector()
         ## First we randomize a number
-        exp_exp_tradeoff = random.uniform(0, 1)
+        exp_exp_tradeoff = np.random.uniform(0, 1)
         
         ## If this number > greater than epsilon --> exploitation (taking the biggest Q value for this state)
-        if exp_exp_tradeoff > self.epsilon:
-            action_id = np.argmax(self.qtable[observation,:])
+        if (self.mode == 'test') or (exp_exp_tradeoff > self.epsilon):
+            action_idx = np.argmax(self.qtable[self.state_vec])
             action = action_space.get_do_nothing_action()
-            action[action_id] = 1
+            # flip the bit on the best action
+            action[action_idx] = int(not action[action_idx])
         # Else doing a random choice --> exploration
         else:
             action = action_space.sample()
         return action
 
+    def get_state_vector(self):
+        obs_min = self.game.export_observation().as_ac_minimalist().as_array()
+        return obs_min.astype(int)  # A bit of a hack converting values to ints for q-learning indices
+
+
     def feed_reward(self, action, new_observation, reward_aslist):
         """
         update the q table using the new observation
         """
+        # this is an array of all zeros and one 1?
+        self.new_state_vec = self.get_state_vector()
 
-class AgentZero(Agent):
-    """
-    do a combination of both random actions, should do nothing about 1/3 of the time
-    """
-    def __init__(self, environment):
-        super().__init__(environment)
-        self.ioman = ActIOnManager(destination_path=os.path.join('saved_actions', 'AgentZero.csv'))
-
-    def act(self, observation):
-        # This agent needs to manipulate actions using grid contextual information, so the observation object needs
-        # to be of class pypownet.environment.Observation: convert from array or raise error if that is not the case
-        if not isinstance(observation, pypownet.environment.Observation):
-            try:
-                observation = self.environment.observation_space.array_to_observation(observation)
-            except Exception as e:
-                raise e
-        # Sanity check: an observation is a structured object defined in the environment file.
-        assert isinstance(observation, pypownet.environment.Observation)
-        action_space = self.environment.action_space
-
-        # Create template of action with no switch activated (do-nothing action)
-        action = action_space.get_do_nothing_action(as_class_Action=True)
-
-        if np.random.choice([0, 1]):
-            action_space.set_lines_status_switch_from_id(
-                action=action,
-                line_id=np.random.randint(action_space.lines_status_subaction_length),
-                new_switch_value=1
-            )
-        if np.random.choice([0, 1]):
-            # Select a random substation ID on which to perform node-splitting
-            target_substation_id = np.random.choice(action_space.substations_ids)
-            target_config_size = action_space.get_number_elements_of_substation(target_substation_id)
-            # Choses a new switch configuration (binary array)
-            target_configuration = np.random.choice([0, 1], size=(target_config_size,))
-
-            action_space.set_substation_switches_in_action(
-                action=action, 
-                substation_id=target_substation_id,
-                new_values=target_configuration
-            )
-
-            # Ensure changes have been done on action
-            current_configuration, _ = action_space.get_substation_switches_in_action(action, target_substation_id)
-            assert np.all(current_configuration == target_configuration)
-
-        # Dump best action into stored actions file
-        self.ioman.dump(action)
-
-        return action
-
-        # No learning (i.e. self.feed_reward does pass)
+        reward = sum(reward_aslist)
+        # Get the old q-value
+        old_value = self.qtable[self.state_vec, action]  
+        
+        # Look-up the next maximum q action given the new state
+        new_max = np.max(self.qtable[self.new_state_vec])
+        # Update the new q value
+        new_value = (1 - self.alpha) * old_value + self.alpha * \
+            (reward + self.gamma * new_max)
+        self.qtable[self.state_vec, action] = new_value
 
 
