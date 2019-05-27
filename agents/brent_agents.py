@@ -7,6 +7,9 @@ from keras import backend as K
 from keras import utils as np_utils
 from keras import optimizers
 from keras import callbacks
+from keras.layers import Dense
+from keras.models import Sequential
+from keras.optimizers import Adam
 
 from pypownet.agent import Agent, ActIOnManager
 import pypownet.environment
@@ -35,11 +38,98 @@ def compute_discounted_R(R, discount_rate=.99):
 
         running_add = running_add * discount_rate + R[t]
         discounted_r[t] = running_add
-
+    sigma = discounted_r.std()
     discounted_r -= discounted_r.mean() 
-    discounted_r /= discounted_r.std()
+    discounted_r /= sigma
 
     return discounted_r
+
+
+
+
+# A2C(Advantage Actor-Critic) agent
+class AgentActorCritic(Agent):
+    def __init__(self, environment, mode='test', 
+                 actor_weights_file='program/actor_weights.h5', 
+                 critic_weights_file='program/critic_weights.h5'):
+        super().__init__(environment)
+        self.ioman = ActIOnManager(destination_path=os.path.join('saved_actions', 'AgentActorCritic.csv'))
+        self.mode = mode
+        game = self.environment.game
+
+        self.state_size = game.export_observation().as_array().shape[0]
+        self.action_size = environment.action_space.get_do_nothing_action().shape[0]
+
+        self.value_size = 1
+
+        # These are hyper parameters for the Policy Gradient
+        self.discount_factor = 0.99
+        self.actor_lr = 0.001
+        self.critic_lr = 0.005
+
+        # create model for policy network
+        self.actor = self.build_actor()
+        self.critic = self.build_critic()
+
+        if mode == 'test':
+            self.actor.load_weights(actor_weights_file)
+            self.critic.load_weights(critic_weights_file)
+
+
+    # approximate policy and value using Neural Network
+    # actor: state is input and probability of each action is output of model
+    def build_actor(self):
+        actor = Sequential()
+        actor.add(Dense(100, input_dim=self.state_size, activation='relu',
+                        kernel_initializer='he_uniform'))
+        actor.add(Dense(self.action_size, activation='softmax',
+                        kernel_initializer='he_uniform'))
+        actor.summary()
+        # See note regarding crossentropy in cartpole_reinforce.py
+        actor.compile(loss='categorical_crossentropy',
+                      optimizer=Adam(lr=self.actor_lr))
+        return actor
+
+    # critic: state is input and value of state is output of model
+    def build_critic(self):
+        critic = Sequential()
+        critic.add(Dense(100, input_dim=self.state_size, activation='relu',
+                         kernel_initializer='he_uniform'))
+        critic.add(Dense(self.value_size, activation='linear',
+                         kernel_initializer='he_uniform'))
+        critic.summary()
+        critic.compile(loss="mse", optimizer=Adam(lr=self.critic_lr))
+        return critic
+
+    # using the output of policy network, pick action stochastically
+    def act(self, state):
+
+        policy = self.actor.predict(state.reshape(1,-1)).flatten()
+
+        action_idx = np.random.choice(self.action_size, 1, p=policy)[0]
+        action_vec = self.environment.action_space.get_do_nothing_action()
+        action_vec[action_idx] = 1
+
+        return action_vec
+
+    def train_model(self, state, action, reward, next_state, done):
+
+        target = np.zeros((1, self.value_size))
+        advantages = np.zeros((1, self.action_size))
+
+        value = self.critic.predict(state.reshape(1,-1))[0]
+        next_value = self.critic.predict(next_state.reshape(1,-1))[0]
+
+        action_idx = np.where(action)[0][0]
+        if done:
+            advantages[0][action_idx] = reward - value
+            target[0][0] = reward
+        else:
+            advantages[0][action_idx] = reward + self.discount_factor * (next_value) - value
+            target[0][0] = reward + self.discount_factor * next_value
+
+        self.actor.fit(state.reshape(1,-1), advantages, epochs=1, verbose=0)
+        self.critic.fit(state.reshape(1,-1), target, epochs=1, verbose=0)
 
 
 
@@ -53,7 +143,7 @@ class AgentPolicyGradient(Agent):
         self.mode = mode
         game = self.environment.game
 
-        self.n_state = game.export_observation().as_ac_minimalist().as_array().shape[0]
+        self.n_state = game.export_observation().as_array().shape[0]
         self.n_action = environment.action_space.get_do_nothing_action().shape[0]
         # self.prob_thresh = 0.9
         # self.choose_from_top_n = 5
