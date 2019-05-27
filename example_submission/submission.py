@@ -9,11 +9,10 @@ import os
 
 import numpy as np
 
+import agents.brent_agents
 
-class Submission(pypownet.agent.Agent):
-    def act(self, observation):
-        action_length = self.environment.action_space.action_length
-        return np.zeros(action_length)
+
+Submission = agents.brent_agents.AgentPolicyGradient
 
 #if you want to load a file (in this directory) names "model.dupm"
 #open("program/model.dump"

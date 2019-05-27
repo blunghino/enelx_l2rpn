@@ -6,6 +6,7 @@ from keras.models import Model
 from keras import backend as K
 from keras import utils as np_utils
 from keras import optimizers
+from keras import callbacks
 
 from pypownet.agent import Agent, ActIOnManager
 import pypownet.environment
@@ -35,16 +36,18 @@ def compute_discounted_R(R, discount_rate=.99):
         running_add = running_add * discount_rate + R[t]
         discounted_r[t] = running_add
 
-    discounted_r -= (discounted_r.mean() / discounted_r.std())
+    discounted_r -= discounted_r.mean() 
+    discounted_r /= discounted_r.std()
 
     return discounted_r
+
 
 
 class AgentPolicyGradient(Agent):
     """
     https://gist.github.com/kkweon/c8d1caabaf7b43317bc8825c226045d2
     """
-    def __init__(self, environment, mode='test', model=None):
+    def __init__(self, environment, mode='test', model_weights_file='program/policy_grad_weights.h5'):
         super().__init__(environment)
         self.ioman = ActIOnManager(destination_path=os.path.join('saved_actions', 'AgentPolicyGradient.csv'))
         self.mode = mode
@@ -52,10 +55,16 @@ class AgentPolicyGradient(Agent):
 
         self.n_state = game.export_observation().as_ac_minimalist().as_array().shape[0]
         self.n_action = environment.action_space.get_do_nothing_action().shape[0]
-        self.prob_thresh = 0.9
+        # self.prob_thresh = 0.9
+        # self.choose_from_top_n = 5
+        self.prev_action_idx = self.n_action
 
         self.__build_network(self.n_state, self.n_action)
         self.__build_train_fn()
+
+        if mode == 'test' and model_weights_file is not None:
+            self.model.load_weights(model_weights_file)
+
 
 
     def __build_network(self, input_dim, output_dim, hidden_dims=[100]):
@@ -69,11 +78,16 @@ class AgentPolicyGradient(Agent):
 
         net = layers.Dense(output_dim)(net)
         net = layers.Activation("softmax")(net)
+        # net = layers.Activation("sigmoid")(net) # sigmoid for multilabel??
 
         self.model = Model(inputs=self.X, outputs=net)
 
     def __build_train_fn(self):
         """Create a train function
+
+        like REINFORCE https://youtu.be/KHZVXao4qXs?t=2979
+        Monte Carlo policy gradient
+
         It replaces `model.fit(X, y)` because we use the output of model and use it for training.
         For example, we need action placeholder
         called `action_one_hot` that stores, which action we took at state `s`.
@@ -135,12 +149,22 @@ class AgentPolicyGradient(Agent):
 
         action_prob = np.squeeze(self.model.predict(state))
         assert len(action_prob) == self.n_action
-        # note right now we can only take one action at a time. 
-        # we could modify this to optimize the whole action vector at once?
-        # return (action_prob > self.prob_thresh).astype(int)
+
+
+        # action_idxs = np.random.choice(np.arange(self.n_action), p=action_prob, size=2).tolist()
+        # action_idx = action_idxs.pop(np.random.randint(0, 2))
+        # # don't allow same action twice in a row
+        # if action_idx == self.prev_action_idx:
+        #     action_idx = action_idxs.pop()
+        # self.prev_action_idx = action_idx
+
         action_idx = np.random.choice(np.arange(self.n_action), p=action_prob)
         action_vec = action_space.get_do_nothing_action()
         action_vec[action_idx] = 1
+
+        # note right now we can only take one action at a time. 
+        # we could modify this to optimize the whole action vector at once?
+        # return (action_prob > self.prob_thresh).astype(int)
         return action_vec
 
     def fit(self, S, A, R):
