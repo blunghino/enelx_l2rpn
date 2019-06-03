@@ -1,3 +1,6 @@
+"""
+https://github.com/rlcode/reinforcement-learning/blob/master/2-cartpole/4-actor-critic/cartpole_a2c.py
+"""
 import os
 
 import numpy as np
@@ -49,6 +52,9 @@ def compute_discounted_R(R, discount_rate=.99):
 
 # A2C(Advantage Actor-Critic) agent
 class AgentActorCritic(Agent):
+    """
+    https://github.com/rlcode/reinforcement-learning/blob/master/2-cartpole/4-actor-critic/cartpole_a2c.py
+    """
     def __init__(self, environment, mode='test', 
                  actor_weights_file='program/actor_weights.h5', 
                  critic_weights_file='program/critic_weights.h5'):
