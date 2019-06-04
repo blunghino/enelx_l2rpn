@@ -20,39 +20,132 @@ import pypownet.environment
 import pypownet.agent
 
 
-def compute_discounted_R(R, discount_rate=.99):
+class A2CAgent(Agent):
     """
-    https://gist.github.com/kkweon/c8d1caabaf7b43317bc8825c226045d2
+    based on code from https://github.com/germain-hug/Deep-RL-Keras/blob/master/A2C/a2c.py
 
-    Returns discounted rewards
-    Args:
-        R (1-D array): a list of `reward` at each time step
-        discount_rate (float): Will discount the future value by this rate
-    Returns:
-        discounted_r (1-D array): same shape as input `R`
-            but the values are discounted
-    Examples:
-        >>> R = [1, 1, 1]
-        >>> compute_discounted_R(R, .99) # before normalization
-        [1 + 0.99 + 0.99**2, 1 + 0.99, 1]
+    similar to AgentActorCritic but using an Entropy term in the loss to encourage exploration
+    loss function optimizes with state, actions, and advantages
     """
-    discounted_r = np.zeros_like(R, dtype=np.float32)
-    running_add = 0
-    for t in reversed(range(len(R))):
+    def __init__(self, environment, mode='test',
+                 actor_weights_file='program/A2CAgent_actor_weights.h5', 
+                 critic_weights_file='program/A2CAgent_critic_weights.h5'):
+        super().__init__(environment)
+        self.mode = mode
+        self.state_size = environment.game.export_observation().as_array().shape[0]
+        self.action_size = environment.action_space.get_do_nothing_action().shape[0]
+        # this sets a limit on how many steps we must wait to reuse an action
 
-        running_add = running_add * discount_rate + R[t]
-        discounted_r[t] = running_add
-    sigma = discounted_r.std()
-    discounted_r -= discounted_r.mean() 
-    discounted_r /= sigma
+        self.value_size = 1
 
-    return discounted_r
+        # These are hyper parameters for the Policy Gradient
+        self.gamma = 0.95
+        self.actor_lr = 0.0001
+        self.critic_lr = 0.001
+        self.entropy_weight = 0.001
 
+        # create model for policy network
+        self.actor = self._build_actor()
+        self.actor.summary()
+        self.critic = self._build_critic()
+        self.critic.summary()
+
+        self.a_opt = self._build_actor_optimizer()
+        self.c_opt = self._build_critic_optimizer()
+
+        if mode == 'test':
+            self.actor.load_weights(actor_weights_file)
+            self.critic.load_weights(critic_weights_file)    
+
+    def _build_actor(self, hidden_dims=[100]):
+        """Create a simple neural network"""
+        self.X = layers.Input(shape=(self.state_size,))
+        net = self.X
+
+        for h_dim in hidden_dims:
+            net = layers.Dense(h_dim, activation='relu', kernel_initializer='he_uniform')(net)
+
+        net = layers.Dense(self.action_size, activation='softmax', kernel_initializer='he_uniform')(net)
+        return Model(inputs=self.X, outputs=net)
+
+    def _build_actor_optimizer(self, epsilon=1e-10):
+        """ Actor Optimization: Advantages + Entropy term to encourage exploration
+        (Cf. https://arxiv.org/abs/1602.01783)
+        """
+        # set up placeholders
+        action_prob_pl = self.actor.output
+        action_onehot_pl = K.placeholder(shape=(None, self.action_size), name="action_onehot")
+        advantages_pl = K.placeholder(shape=(None,), name="advantages")
+        
+        weighted_actions = K.sum(action_onehot_pl * action_prob_pl, axis=1)
+        policy_loss = K.sum(K.log(weighted_actions + epsilon) * K.stop_gradient(advantages_pl))
+        entropy_loss = K.sum(action_prob_pl * K.log(action_prob_pl + epsilon), axis=1)
+        actor_loss = self.entropy_weight * entropy_loss - policy_loss
+
+        adam = optimizers.Adam()
+        updates = adam.get_updates(self.actor.trainable_weights, [], actor_loss)
+
+        return K.function([self.actor.input, action_onehot_pl, advantages_pl], [], updates=updates)
+
+    def _build_critic(self, hidden_dims=[100]):
+        self.X = layers.Input(shape=(self.state_size,))
+        net = self.X
+
+        for h_dim in hidden_dims:
+            net = layers.Dense(h_dim, activation='relu', kernel_initializer='he_uniform')(net)
+
+        net = layers.Dense(self.value_size, activation='linear', kernel_initializer='he_uniform')(net)
+        return Model(inputs=self.X, outputs=net)
+
+    def _build_critic_optimizer(self):
+        """
+        https://github.com/germain-hug/Deep-RL-Keras/blob/master/A2C/critic.py
+        """
+        discounted_r_pl = K.placeholder(shape=(None,), name="discounted_reward")
+
+        critic_loss = K.mean(K.square(discounted_r_pl - self.critic.output))
+
+        adam = optimizers.Adam()
+        updates = adam.get_updates(self.critic.trainable_weights, [], critic_loss)
+
+        return K.function([self.critic.input, discounted_r_pl], [], updates=updates)
+
+    def train_model(self, states, actions, rewards):
+        # if not in train mode, don't train!
+        if self.mode != 'train':
+            warnings.warn('A2CAgent is not in train mode but train_model method was called. To update model weights, reinitialize agent with mode="train"')
+            return
+        # calc discounted r
+        discounted_r, cumul_r = np.zeros_like(rewards), 0
+        for t in reversed(range(0, len(rewards))):
+            cumul_r = rewards[t] + cumul_r * self.gamma
+            discounted_r[t] = cumul_r
+        # predicted state values
+        state_values = self.critic.predict(states)
+        advantages = discounted_r - state_values.reshape(len(state_values))
+        self.a_opt([states, actions, advantages])
+        self.c_opt([states, discounted_r])
+
+    # # using the output of policy network, pick action stochastically
+    def act(self, state):
+
+        policy = self.actor.predict(state.reshape(1,-1)).flatten()
+
+        action_idx = np.random.choice(self.action_size, 1, p=policy)[0]
+        action = self.environment.action_space.get_do_nothing_action()
+        action[action_idx] = 1
+
+        return action
 
 # A2C(Advantage Actor-Critic) agent
 class AgentActorCritic(Agent):
     """
+    keras implementation,
     https://github.com/rlcode/reinforcement-learning/blob/master/2-cartpole/4-actor-critic/cartpole_a2c.py
+    keras, uses advantages with ENTROPY term 
+    https://github.com/germain-hug/Deep-RL-Keras/blob/master/A2C/actor.py
+    tf, uses advantages with entropy term
+    http://inoryy.com/post/tensorflow2-deep-reinforcement-learning/
     """
     def __init__(self, environment, mode='test', action_cooldown=3,
                  actor_weights_file='program/actor_weights.h5', 
@@ -60,7 +153,6 @@ class AgentActorCritic(Agent):
         super().__init__(environment)
         self.ioman = ActIOnManager(destination_path=os.path.join('saved_actions', 'AgentActorCritic.csv'))
         self.mode = mode
-        game = self.environment.game
 
         self.state_size = game.export_observation().as_array().shape[0]
         self.action_size = environment.action_space.get_do_nothing_action().shape[0]
@@ -70,13 +162,13 @@ class AgentActorCritic(Agent):
         self.value_size = 1
 
         # These are hyper parameters for the Policy Gradient
-        self.discount_factor = 0.99
-        self.actor_lr = 0.001
-        self.critic_lr = 0.005
+        self.discount_factor = 0.9
+        self.actor_lr = 0.0001
+        self.critic_lr = 0.001
 
         # create model for policy network
-        self.actor = self.build_actor()
-        self.critic = self.build_critic()
+        self.actor = self._build_actor()
+        self.critic = self._build_critic()
 
         if mode == 'test':
             self.actor.load_weights(actor_weights_file)
@@ -85,20 +177,19 @@ class AgentActorCritic(Agent):
 
     # approximate policy and value using Neural Network
     # actor: state is input and probability of each action is output of model
-    def build_actor(self):
+    def _build_actor(self):
         actor = Sequential()
         actor.add(Dense(100, input_dim=self.state_size, activation='relu',
                         kernel_initializer='he_uniform'))
         actor.add(Dense(self.action_size, activation='softmax',
                         kernel_initializer='he_uniform'))
         actor.summary()
-        # See note regarding crossentropy in cartpole_reinforce.py
         actor.compile(loss='categorical_crossentropy',
                       optimizer=Adam(lr=self.actor_lr))
         return actor
 
     # critic: state is input and value of state is output of model
-    def build_critic(self):
+    def _build_critic(self):
         critic = Sequential()
         critic.add(Dense(100, input_dim=self.state_size, activation='relu',
                          kernel_initializer='he_uniform'))
@@ -128,7 +219,7 @@ class AgentActorCritic(Agent):
         if self.mode != 'train':
             warnings.warn('AgentActorCritic is not in train mode but train_model method was called. To update model weights, reinitialize agent with mode="train"')
             return
-            
+
         target = np.zeros((1, self.value_size))
         advantages = np.zeros((1, self.action_size))
 
@@ -146,6 +237,34 @@ class AgentActorCritic(Agent):
         self.actor.fit(state.reshape(1,-1), advantages, epochs=1, verbose=0)
         self.critic.fit(state.reshape(1,-1), target, epochs=1, verbose=0)
 
+
+def compute_discounted_R(R, discount_rate=.99):
+    """
+    https://gist.github.com/kkweon/c8d1caabaf7b43317bc8825c226045d2
+
+    Returns discounted rewards
+    Args:
+        R (1-D array): a list of `reward` at each time step
+        discount_rate (float): Will discount the future value by this rate
+    Returns:
+        discounted_r (1-D array): same shape as input `R`
+            but the values are discounted
+    Examples:
+        >>> R = [1, 1, 1]
+        >>> compute_discounted_R(R, .99) # before normalization
+        [1 + 0.99 + 0.99**2, 1 + 0.99, 1]
+    """
+    discounted_r = np.zeros_like(R, dtype=np.float32)
+    running_add = 0
+    for t in reversed(range(len(R))):
+
+        running_add = running_add * discount_rate + R[t]
+        discounted_r[t] = running_add
+    sigma = discounted_r.std()
+    discounted_r -= discounted_r.mean() 
+    discounted_r /= sigma
+
+    return discounted_r
 
 
 class AgentPolicyGradient(Agent):
