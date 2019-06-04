@@ -1,4 +1,6 @@
 import os
+from os.path import join
+import time 
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -6,6 +8,7 @@ import pandas as pd
 import json
 
 from utils.ingestion_program.runner import Runner #an override of pypownet.runner 
+from utils.scoring_program import evaluate
 import pypownet.environment
 from agents import brent_agents
 
@@ -16,39 +19,63 @@ class ActorCriticRunner(Runner):
     def loop(self, iterations, episodes=1):
 
         episode_rewards = []
+        all_logs = []
         cumul_reward = 0.
         best_reward = 0.
         for e in range(episodes):
             done = False
             episode_reward = 0.
+            # reset environment for new episode
             observation = self.environment.reset()
-
+            current_chronic_name = self.environment.get_current_chronic_name()
+            machine_logs = []
+            t0 = time.time()
             for i in range(iterations):
-
+                # one step of the environment/game
                 (next_observation, action, reward, reward_aslist, done) = self.step(observation)
-
-                # next_obs_min = self.environment.observation_space.array_to_observation(next_observation) \
-                #                                                  .as_ac_minimalist() \
-                #                                                  .as_array() 
-
+                # update models given information from step
                 self.agent.train_model(observation, action, reward, next_observation, done)
-
+                # track rewards
                 episode_reward += reward
                 cumul_reward += reward
                 observation = next_observation
+                # write logs
+                self.logger.info("step %d/%d - reward: %.2f; cumulative reward: %.2f" %
+                                    (i, iterations, reward, cumul_reward))
+                machine_logs.append([i,
+                                     done,
+                                     reward,
+                                     [float(x) for x in reward_aslist],
+                                     cumul_reward,
+                                     str(self.environment.get_current_datetime()),
+                                     time.time() - t0,
+                                     action.tolist(),
+                                     list(observation)
+                                     ])
 
+                # stop this episode when a "done" signal is received
                 if done:
                     break
             # episode clean up
             episode_rewards.append(episode_reward)
             best_reward = max(best_reward, episode_reward)
             print("episode:", e, "  reward:", episode_reward)
+            all_logs.append(machine_logs)
 
         print('best episode reward =', best_reward)
         print('cumulative reward =', cumul_reward)
+        # write logs for plotting later
+        self.dump_machinelogs(all_logs, current_chronic_name)
+        # plot of rewards by episode
         fig = plt.figure()
         plt.plot(episode_rewards)
-        fig.savefig('ActorCriticRunner_rewards.png', dpi=300)
+        plt.xlabel('episode #')
+        plt.ylabel('reward')
+        save_fig_dir = join(
+            os.path.split(self.machinelog_filepath)[0], 
+            'ActorCriticRunner_rewards.png'
+        )
+        fig.savefig(save_fig_dir, dpi=300)
         plt.close()         
         return cumul_reward
 
@@ -100,7 +127,6 @@ class PolicyGradientRunner(Runner):
         fig = plt.figure()
         plt.plot(episode_rewards)
         fig.savefig('PolicyGradientRunner_rewards.png', dpi=300)
-        plt.close()
         return cumul_rew
 
 
@@ -110,11 +136,13 @@ def set_environment(game_level="datasets", start_id=0, input_dir='public_data/')
     """
     return pypownet.environment.RunEnv(parameters_folder=os.path.abspath(input_dir),
                                               game_level=game_level,
-                                              chronic_looping_mode='natural', start_id=start_id,
+                                              chronic_looping_mode='natural', 
+                                              start_id=start_id,
                                               game_over_mode="soft")
 
 
 if __name__ == '__main__':
+## policy gradient agent training
     # save_weights_path = 'program/policy_grad_weights.h5'
     # env_train = set_environment()
     # agent = brent_agents.AgentPolicyGradient(env_train, mode='train')
@@ -126,14 +154,41 @@ if __name__ == '__main__':
     # # todo serialize trained model
     # agent.model.save_weights(save_weights_path)
 
+## Actor/critic agent training
+    n_episodes = 3
+    n_iterations = 32
+    # where to save stuff
+    log_dir = join('utils', 'logs')
+    machinelog_filepath = join(log_dir, 'ActorCriticRunner_machinelog.json')
+    # agent in train mode
     env_train = set_environment()
     agent = brent_agents.AgentActorCritic(env_train, mode='train')
-    n_episodes = 100
-    n_iterations = 32
-    ac_runner = ActorCriticRunner(env_train, agent, verbose=False)
+    ac_runner = ActorCriticRunner(env_train, agent, verbose=False, 
+                                  machinelog_filepath=machinelog_filepath)
     # Run the planned experiment of this phase with the submitted model
     score = ac_runner.loop(n_iterations, n_episodes)
-    # todo serialize trained model
+    # serialize trained model
     agent.actor.save_weights('program/actor_weights.h5')
     agent.critic.save_weights('program/critic_weights.h5')
-
+    # more figures, showing action distributions from log data
+    action_space = env_train.action_space
+    # action_space = evaluate.get_action_space(join('utils', "ref"))
+    with open(machinelog_filepath, 'r') as json_file:
+        data = json.load(json_file)
+    action_label = data["labels"]["action"]
+    # track action counts in this dict
+    action_counter_cumul = {k: 0 for k in evaluate.list_possible_actions(action_space)}
+    # get action counts over all episodes 
+    for j in range(len(data['log'])):
+        actions = np.array(np.array(data["log"][0], dtype=object)[:, action_label])
+        action_counter, count_three_types = evaluate.action_count(action_space, actions)
+        for k in action_counter_cumul.keys():
+            action_counter_cumul[k] += action_counter[k]
+    # plot action distribution
+    fig = plt.figure(figsize=(11,6))
+    x = list(action_counter_cumul.keys())
+    h = [action_counter_cumul[el] for el in x]
+    plt.bar(x, h, 1)
+    plt.title("Distribution of line actions")
+    plt.xticks(rotation=45)
+    fig.savefig(join(log_dir, 'ActorCritic_action_distribution.png'), dpi=300)

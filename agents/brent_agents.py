@@ -2,6 +2,7 @@
 https://github.com/rlcode/reinforcement-learning/blob/master/2-cartpole/4-actor-critic/cartpole_a2c.py
 """
 import os
+import warnings
 
 import numpy as np
 from keras import layers
@@ -48,14 +49,12 @@ def compute_discounted_R(R, discount_rate=.99):
     return discounted_r
 
 
-
-
 # A2C(Advantage Actor-Critic) agent
 class AgentActorCritic(Agent):
     """
     https://github.com/rlcode/reinforcement-learning/blob/master/2-cartpole/4-actor-critic/cartpole_a2c.py
     """
-    def __init__(self, environment, mode='test', 
+    def __init__(self, environment, mode='test', action_cooldown=3,
                  actor_weights_file='program/actor_weights.h5', 
                  critic_weights_file='program/critic_weights.h5'):
         super().__init__(environment)
@@ -65,6 +64,8 @@ class AgentActorCritic(Agent):
 
         self.state_size = game.export_observation().as_array().shape[0]
         self.action_size = environment.action_space.get_do_nothing_action().shape[0]
+        # this sets a limit on how many steps we must wait to reuse an action
+        self.action_cooldown = action_cooldown
 
         self.value_size = 1
 
@@ -107,26 +108,34 @@ class AgentActorCritic(Agent):
         critic.compile(loss="mse", optimizer=Adam(lr=self.critic_lr))
         return critic
 
-    # using the output of policy network, pick action stochastically
+    # # using the output of policy network, pick action stochastically
     def act(self, state):
 
         policy = self.actor.predict(state.reshape(1,-1)).flatten()
 
         action_idx = np.random.choice(self.action_size, 1, p=policy)[0]
-        action_vec = self.environment.action_space.get_do_nothing_action()
-        action_vec[action_idx] = 1
+        action = self.environment.action_space.get_do_nothing_action()
+        action[action_idx] = 1
 
-        return action_vec
+        return action
+
+    # # this version of 
+    # def act(self, state):
+
 
     def train_model(self, state, action, reward, next_state, done):
-
+        # if not in train mode, don't train!
+        if self.mode != 'train':
+            warnings.warn('AgentActorCritic is not in train mode but train_model method was called. To update model weights, reinitialize agent with mode="train"')
+            return
+            
         target = np.zeros((1, self.value_size))
         advantages = np.zeros((1, self.action_size))
 
         value = self.critic.predict(state.reshape(1,-1))[0]
         next_value = self.critic.predict(next_state.reshape(1,-1))[0]
 
-        action_idx = np.where(action)[0][0]
+        action_idx = np.where(action)[0]
         if done:
             advantages[0][action_idx] = reward - value
             target[0][0] = reward
