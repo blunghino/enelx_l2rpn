@@ -14,6 +14,7 @@ from keras import callbacks
 from keras.layers import Dense
 from keras.models import Sequential
 from keras.optimizers import Adam
+from keras import losses 
 
 from pypownet.agent import Agent, ActIOnManager
 import pypownet.environment
@@ -26,8 +27,13 @@ class A2CAgent(Agent):
 
     similar to AgentActorCritic but using an Entropy term in the loss to encourage exploration
     loss function optimizes with state, actions, and advantages
+
+    https://github.com/dennybritz/reinforcement-learning/issues/34
     """
-    def __init__(self, environment, mode='test',
+    def __init__(self, environment, mode='test', gamma=0.99, actor_lr=1e-3, 
+                 critic_lr=1e-3, entropy_weight=1e-3, 
+                 actor_hidden_dims=[100],
+                 critic_hidden_dims=[100],
                  actor_weights_file='program/A2CAgent_actor_weights.h5', 
                  critic_weights_file='program/A2CAgent_critic_weights.h5'):
         super().__init__(environment)
@@ -39,15 +45,15 @@ class A2CAgent(Agent):
         self.value_size = 1
 
         # These are hyper parameters for the Policy Gradient
-        self.gamma = 0.95
-        self.actor_lr = 0.0001
-        self.critic_lr = 0.001
-        self.entropy_weight = 0.001
+        self.gamma = gamma
+        self.actor_lr = actor_lr
+        self.critic_lr = critic_lr
+        self.entropy_weight = entropy_weight
 
         # create model for policy network
-        self.actor = self._build_actor()
+        self.actor = self._build_actor(hidden_dims=actor_hidden_dims)
         self.actor.summary()
-        self.critic = self._build_critic()
+        self.critic = self._build_critic(hidden_dims=critic_hidden_dims)
         self.critic.summary()
 
         self.a_opt = self._build_actor_optimizer()
@@ -71,16 +77,21 @@ class A2CAgent(Agent):
     def _build_actor_optimizer(self, epsilon=1e-10):
         """ Actor Optimization: Advantages + Entropy term to encourage exploration
         (Cf. https://arxiv.org/abs/1602.01783)
+
+        explanation of entropy https://github.com/dennybritz/reinforcement-learning/issues/34
+        H(X) = -Sum P(x) log(P(x))
         """
         # set up placeholders
-        action_prob_pl = self.actor.output
         action_onehot_pl = K.placeholder(shape=(None, self.action_size), name="action_onehot")
         advantages_pl = K.placeholder(shape=(None,), name="advantages")
         
-        weighted_actions = K.sum(action_onehot_pl * action_prob_pl, axis=1)
+        weighted_actions = K.sum(action_onehot_pl * self.actor.output, axis=1)
         policy_loss = K.sum(K.log(weighted_actions + epsilon) * K.stop_gradient(advantages_pl))
-        entropy_loss = K.sum(action_prob_pl * K.log(action_prob_pl + epsilon), axis=1)
+        entropy_loss = K.sum(self.actor.output * K.log(self.actor.output + epsilon), axis=1)
+        # is this negative sign right?
         actor_loss = self.entropy_weight * entropy_loss - policy_loss
+        # minimize policy loss high entropy (uniformity) is rewarded
+        # actor_loss = - self.entropy_weight * entropy_loss + policy_loss 
 
         adam = optimizers.Adam()
         updates = adam.get_updates(self.actor.trainable_weights, [], actor_loss)
@@ -102,7 +113,7 @@ class A2CAgent(Agent):
         https://github.com/germain-hug/Deep-RL-Keras/blob/master/A2C/critic.py
         """
         discounted_r_pl = K.placeholder(shape=(None,), name="discounted_reward")
-
+        # rmse
         critic_loss = K.mean(K.square(discounted_r_pl - self.critic.output))
 
         adam = optimizers.Adam()
@@ -116,10 +127,11 @@ class A2CAgent(Agent):
             warnings.warn('A2CAgent is not in train mode but train_model method was called. To update model weights, reinitialize agent with mode="train"')
             return
         # calc discounted r
-        discounted_r, cumul_r = np.zeros_like(rewards), 0
-        for t in reversed(range(0, len(rewards))):
-            cumul_r = rewards[t] + cumul_r * self.gamma
-            discounted_r[t] = cumul_r
+        # discounted_r, cumul_r = np.zeros_like(rewards), 0
+        # for t in reversed(range(0, len(rewards))):
+        #     cumul_r = rewards[t] + cumul_r * self.gamma
+        #     discounted_r[t] = cumul_r
+        discounted_r = compute_discounted_R(rewards, self.gamma)
         # predicted state values
         state_values = self.critic.predict(states)
         advantages = discounted_r - state_values.reshape(len(state_values))

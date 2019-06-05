@@ -17,7 +17,7 @@ class A2CRunner(Runner):
     """
     Runner for proper A2C with batched updates and entropy loss
     """
-    def loop(self, iterations, episodes=1):
+    def loop(self, iterations, episodes=1, break_on_done=True):
 
         episode_rewards = []
         all_logs = []
@@ -60,7 +60,7 @@ class A2CRunner(Runner):
                                      ])
 
                 # stop this episode when a "done" signal is received
-                if done:
+                if done and break_on_done:
                     break
             # update model weights based on the past episode of experiences
             self.agent.train_model(np.array(S), np.array(A), np.array(R))
@@ -218,7 +218,7 @@ def set_environment(game_level="datasets", start_id=0, input_dir='public_data/')
 
 if __name__ == '__main__':
     n_episodes = 100
-    n_iterations = 32
+    n_iterations = 100
     # where to save stuff
     log_dir = join('utils', 'logs')
 ## policy gradient agent training
@@ -246,7 +246,16 @@ if __name__ == '__main__':
     machinelog_filepath = join(log_dir, 'A2CRunner_machinelog.json')
     # agent in train mode
     env_train = set_environment()
-    agent = brent_agents.A2CAgent(env_train, mode='train')
+    agent = brent_agents.A2CAgent(
+        env_train, 
+        mode='train', 
+        gamma=0.9, 
+        actor_lr=1e-4, 
+        critic_lr=1e-3, 
+        entropy_weight=32.,
+        actor_hidden_dims=[100],
+        critic_hidden_dims=[30],
+    )
     a2c_runner = A2CRunner(env_train, agent, verbose=False, 
                                   machinelog_filepath=machinelog_filepath)
     # Run the planned experiment of this phase with the submitted model
@@ -267,7 +276,7 @@ if __name__ == '__main__':
     action_counter_cumul = {k: 0 for k in evaluate.list_possible_actions(action_space)}
     # get action counts over all episodes 
     for j in range(len(data['log'])):
-        actions = np.array(np.array(data["log"][0], dtype=object)[:, action_label])
+        actions = np.array(np.array(data["log"][j], dtype=object)[:, action_label])
         action_counter, count_three_types = evaluate.action_count(action_space, actions)
         for k in action_counter_cumul.keys():
             action_counter_cumul[k] += action_counter[k]
