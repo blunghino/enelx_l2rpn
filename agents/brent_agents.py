@@ -34,14 +34,15 @@ class A2CAgent(Agent):
                  critic_lr=1e-3, entropy_weight=1e-3, 
                  actor_hidden_dims=[100],
                  critic_hidden_dims=[100],
+                 n_actions_per_timestep=10,
                  actor_weights_file='program/A2CAgent_actor_weights.h5', 
                  critic_weights_file='program/A2CAgent_critic_weights.h5'):
         super().__init__(environment)
         self.mode = mode
         self.state_size = environment.game.export_observation().as_array().shape[0]
         self.action_size = environment.action_space.get_do_nothing_action().shape[0]
-        # this sets a limit on how many steps we must wait to reuse an action
-
+        # this sets how many actions to take in a timestep
+        self.n_actions_per_timestep = n_actions_per_timestep
         self.value_size = 1
 
         # These are hyper parameters for the Policy Gradient
@@ -143,7 +144,7 @@ class A2CAgent(Agent):
 
         policy = self.actor.predict(state.reshape(1,-1)).flatten()
 
-        action_idx = np.random.choice(self.action_size, 1, p=policy)[0]
+        action_idx = np.random.choice(self.action_size, self.n_actions_per_timestep, p=policy)
         action = self.environment.action_space.get_do_nothing_action()
         action[action_idx] = 1
 
