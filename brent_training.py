@@ -11,6 +11,7 @@ from utils.ingestion_program.runner import Runner #an override of pypownet.runne
 from utils.scoring_program import evaluate
 import pypownet.environment
 from agents import brent_agents
+from graph import ObservationSpaceGraph
 
 
 class A2CRunner(Runner):
@@ -38,7 +39,11 @@ class A2CRunner(Runner):
                 # one step of the environment/game
                 (next_observation, action, reward, reward_aslist, done) = self.step(observation)
                 # memory to use to update model at the end of each game
-                S.append(observation)
+                if self.agent.obs_graph is not None:
+                    # remember feature engineered observation
+                    S.append(self.agent.obs_graph.get_state_with_graph_features(observation))
+                else:
+                    S.append(observation)
                 A.append(action)
                 R.append(reward)
                 # track rewards
@@ -205,7 +210,7 @@ class PolicyGradientRunner(Runner):
         return cumul_rew
 
 
-def set_environment(game_level="datasets", start_id=0, input_dir='public_data/'):
+def set_environment(game_level="datasets", start_id=0, input_dir='public_data/', game_over_mode='hard'):
     """
     Load the first chronic (scenario) in the directory public_data/datasets 
     """
@@ -213,14 +218,16 @@ def set_environment(game_level="datasets", start_id=0, input_dir='public_data/')
                                               game_level=game_level,
                                               chronic_looping_mode='natural', 
                                               start_id=start_id,
-                                              game_over_mode="soft")
+                                              game_over_mode=game_over_mode)
 
 
 if __name__ == '__main__':
-    n_episodes = 100
-    n_iterations = 100
+    n_episodes = 16
+    n_iterations = 200
     # where to save stuff
     log_dir = join('utils', 'logs')
+    # params_dir = 'public_data'
+    params_dir = '../chronics_contestants'
 ## policy gradient agent training
     # save_weights_path = 'program/policy_grad_weights.h5'
     # env_train = set_environment()
@@ -245,16 +252,18 @@ if __name__ == '__main__':
 ## A2C agent training
     machinelog_filepath = join(log_dir, 'A2CRunner_machinelog.json')
     # agent in train mode
-    env_train = set_environment()
+    env_train = set_environment(input_dir=params_dir, game_over_mode='hard')
     agent = brent_agents.A2CAgent(
         env_train, 
         mode='train', 
-        gamma=0.9, 
-        actor_lr=1e-4, 
+        gamma=0.99, 
+        actor_lr=1e-3, 
         critic_lr=1e-3, 
-        entropy_weight=32.,
+        entropy_weight=1,
+        l2_reg_weight=1,
         actor_hidden_dims=[100],
-        critic_hidden_dims=[30],
+        critic_hidden_dims=[50],
+        graph_class=ObservationSpaceGraph
     )
     a2c_runner = A2CRunner(env_train, agent, verbose=False, 
                                   machinelog_filepath=machinelog_filepath)

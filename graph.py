@@ -1,3 +1,4 @@
+import numpy as np 
 import networkx as nx
 
 
@@ -14,7 +15,7 @@ class ObservationSpaceGraph(object):
         self.__get_nodes()
         self.__get_edges()
         return({'obs_G': self.__build_graph(),
-                'obs_DG': self.__build_directed_graph()})
+                'obs_DG': self.__build_directed_graph()})        
 
     def __build_graph(self):
         # Build the undirected graph
@@ -51,3 +52,44 @@ class ObservationSpaceGraph(object):
                 'limit': thermal_limits[i]
             }
             self.edges[i] = tuple([self.edges[i][0], self.edges[i][1], edge_properties])
+
+    def get_state_with_graph_features(self, obs_array):
+        """
+        Feature engineering for observation space
+
+        Parameters
+        ----------
+        obs_array : numpy.ndarray
+            Observation vector to use to generate graph based features
+
+        Returns
+        -------
+        np.ndarray
+            state space vector with graph engineered features
+        """
+        graphs = self.get_graph(obs_array)
+        # This was originally designed for ranking web pages
+        # The result is a ranking of the substations in the grid taking into account their connectedness & weight (flows)
+        # We might want to toggle the substations with the highest or lowest values
+        pagerank = list(nx.pagerank(graphs['obs_G']).values())
+
+        # The sum of the fraction of all-pairs shortest paths that passes through node in key
+        # This is a potential measure of how critical a substation is for connecting the grid
+        betweenness_centrality = list(nx.betweenness_centrality(graphs['obs_G']).values())
+
+        # Measure of how central a substation is in the grid
+        degree_centrality = list(nx.degree_centrality(graphs['obs_G']).values())
+
+        # Measure of how central a substation is as a producer (uses a directed graph)
+        out_degree_centrality = list(nx.out_degree_centrality(graphs['obs_DG']).values())
+
+        # Measure of how central a substation is as a consumer (uses a directed graph)
+        in_degree_centrality = list(nx.in_degree_centrality(graphs['obs_DG']).values())
+        return np.hstack((
+            obs_array,
+            pagerank,
+            betweenness_centrality,
+            degree_centrality,
+            out_degree_centrality,
+            in_degree_centrality
+        ))

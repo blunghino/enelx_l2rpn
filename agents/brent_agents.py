@@ -12,6 +12,7 @@ from keras import utils as np_utils
 from keras import optimizers
 from keras import callbacks
 from keras.layers import Dense
+from keras.regularizers import l2
 from keras.models import Sequential
 from keras.optimizers import Adam
 from keras import losses 
@@ -34,12 +35,23 @@ class A2CAgent(Agent):
                  critic_lr=1e-3, entropy_weight=1e-3, 
                  actor_hidden_dims=[100],
                  critic_hidden_dims=[100],
-                 n_actions_per_timestep=10,
+                 n_actions_per_timestep=1,
+                 l2_reg_weight=0.,
+                 graph_class=None,
                  actor_weights_file='program/A2CAgent_actor_weights.h5', 
                  critic_weights_file='program/A2CAgent_critic_weights.h5'):
         super().__init__(environment)
         self.mode = mode
-        self.state_size = environment.game.export_observation().as_array().shape[0]
+        self.graph_class = graph_class
+        if graph_class is None:
+            self.obs_graph = None
+            self.state_size = environment.game.export_observation().as_array().shape[0]
+        else:
+            # initalize graph class with observation space
+            self.obs_graph = graph_class(environment.observation_space)
+            obs = environment.game.export_observation().as_array()
+            # feature engineering on observation space with graph class
+            self.state_size = self.obs_graph.get_state_with_graph_features(obs).shape[0]
         self.action_size = environment.action_space.get_do_nothing_action().shape[0]
         # this sets how many actions to take in a timestep
         self.n_actions_per_timestep = n_actions_per_timestep
@@ -50,6 +62,7 @@ class A2CAgent(Agent):
         self.actor_lr = actor_lr
         self.critic_lr = critic_lr
         self.entropy_weight = entropy_weight
+        self.l2_reg_weight = l2_reg_weight
 
         # create model for policy network
         self.actor = self._build_actor(hidden_dims=actor_hidden_dims)
@@ -72,7 +85,8 @@ class A2CAgent(Agent):
         for h_dim in hidden_dims:
             net = layers.Dense(h_dim, activation='relu', kernel_initializer='he_uniform')(net)
 
-        net = layers.Dense(self.action_size, activation='softmax', kernel_initializer='he_uniform')(net)
+        net = layers.Dense(self.action_size, activation='softmax', kernel_initializer='he_uniform', 
+                                kernel_regularizer=l2(self.l2_reg_weight))(net)
         return Model(inputs=self.X, outputs=net)
 
     def _build_actor_optimizer(self, epsilon=1e-10):
@@ -106,7 +120,8 @@ class A2CAgent(Agent):
         for h_dim in hidden_dims:
             net = layers.Dense(h_dim, activation='relu', kernel_initializer='he_uniform')(net)
 
-        net = layers.Dense(self.value_size, activation='linear', kernel_initializer='he_uniform')(net)
+        net = layers.Dense(self.value_size, activation='linear', kernel_initializer='he_uniform', 
+                                kernel_regularizer=l2(self.l2_reg_weight))(net)
         return Model(inputs=self.X, outputs=net)
 
     def _build_critic_optimizer(self):
@@ -127,6 +142,9 @@ class A2CAgent(Agent):
         if self.mode != 'train':
             warnings.warn('A2CAgent is not in train mode but train_model method was called. To update model weights, reinitialize agent with mode="train"')
             return
+        # check that the state passed in is correct... feature engineering must be handled external to the
+        # train_model method
+        assert states.shape[1] == self.state_size
         # calc discounted r
         # discounted_r, cumul_r = np.zeros_like(rewards), 0
         # for t in reversed(range(0, len(rewards))):
@@ -141,7 +159,8 @@ class A2CAgent(Agent):
 
     # # using the output of policy network, pick action stochastically
     def act(self, state):
-
+        if self.obs_graph is not None:
+            state = self.obs_graph.get_state_with_graph_features(state)
         policy = self.actor.predict(state.reshape(1,-1)).flatten()
 
         action_idx = np.random.choice(self.action_size, self.n_actions_per_timestep, p=policy)
