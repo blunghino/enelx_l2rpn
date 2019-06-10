@@ -263,7 +263,8 @@ if __name__ == '__main__':
         l2_reg_weight=1,
         actor_hidden_dims=[100],
         critic_hidden_dims=[50],
-        graph_class=ObservationSpaceGraph
+        graph_class=ObservationSpaceGraph,
+        n_actions_per_timestep=1
     )
     a2c_runner = A2CRunner(env_train, agent, verbose=False, 
                                   machinelog_filepath=machinelog_filepath)

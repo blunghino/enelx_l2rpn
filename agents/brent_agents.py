@@ -163,7 +163,7 @@ class A2CAgent(Agent):
             state = self.obs_graph.get_state_with_graph_features(state)
         policy = self.actor.predict(state.reshape(1,-1)).flatten()
 
-        action_idx = np.random.choice(self.action_size, self.n_actions_per_timestep, p=policy)
+        action_idx = np.random.choice(self.action_size, self.n_actions_per_timestep, p=policy, replace=False)
         action = self.environment.action_space.get_do_nothing_action()
         action[action_idx] = 1
 

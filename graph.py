@@ -71,20 +71,34 @@ class ObservationSpaceGraph(object):
         # This was originally designed for ranking web pages
         # The result is a ranking of the substations in the grid taking into account their connectedness & weight (flows)
         # We might want to toggle the substations with the highest or lowest values
-        pagerank = list(nx.pagerank(graphs['obs_G']).values())
+        pagerank_ = nx.pagerank(graphs['obs_G'])
 
         # The sum of the fraction of all-pairs shortest paths that passes through node in key
         # This is a potential measure of how critical a substation is for connecting the grid
-        betweenness_centrality = list(nx.betweenness_centrality(graphs['obs_G']).values())
+        betweenness_centrality_ = nx.betweenness_centrality(graphs['obs_G'])
 
         # Measure of how central a substation is in the grid
-        degree_centrality = list(nx.degree_centrality(graphs['obs_G']).values())
+        degree_centrality_ = nx.degree_centrality(graphs['obs_G'])
 
         # Measure of how central a substation is as a producer (uses a directed graph)
-        out_degree_centrality = list(nx.out_degree_centrality(graphs['obs_DG']).values())
+        out_degree_centrality_ = nx.out_degree_centrality(graphs['obs_DG'])
 
         # Measure of how central a substation is as a consumer (uses a directed graph)
-        in_degree_centrality = list(nx.in_degree_centrality(graphs['obs_DG']).values())
+        in_degree_centrality_ = nx.in_degree_centrality(graphs['obs_DG'])
+
+        pagerank = []
+        betweenness_centrality = []
+        degree_centrality = []
+        out_degree_centrality = []
+        in_degree_centrality = []
+
+        for k in sorted(pagerank_.keys()):
+            pagerank.append(pagerank_[k])
+            betweenness_centrality.append(betweenness_centrality_[k])
+            degree_centrality.append(degree_centrality_[k])
+            out_degree_centrality.append(out_degree_centrality_[k])
+            in_degree_centrality.append(in_degree_centrality_[k])
+
         return np.hstack((
             obs_array,
             pagerank,
